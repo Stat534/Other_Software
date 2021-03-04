@@ -1,0 +1,156 @@
+---
+title: "Beyond Stan: Other Spatial Model Fitting Options"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(spBayes)
+library(geoR)
+library(tidyverse)
+library(mnormt)
+library(coda)
+```
+
+
+## Software Demos
+
+- We are going to look at a couple options for fitting spatial models.
+
+1. `krige.bayes()` in `geoR`,
+2. `krige.conv()` in `geoR`,
+3. `spLM()` in `spBayes`, and
+
+
+
+## `krige.bayes()` demo
+- For this demonstration we will explore the `krige.bayes()` function in R using a modified script from the function description. With this exploration, answer the following questions.
+
+
+```{r}
+set.seed(03042021)
+
+# generating a simulated realization from Gaussian random field
+ex_data <- grf(100, cov.pars=c(10, .15), cov.model="exponential", nugget = 1)
+
+
+tibble(x1 = ex_data$coords[,'x'], x2 = ex_data$coords[,'y'], y = ex_data$data) %>% 
+  ggplot(aes(x = x1, y = x2)) + geom_point(aes(color = y)) +
+  scale_color_gradient2() + theme_minimal()
+
+# Variogram
+plot(variog(ex_data, max.dist=1))
+
+# defining the grid of prediction locations:
+ex_grid <- as.matrix(expand.grid(seq(0,1,length.out = 15), seq(0,1,length.out = 15)))
+
+# computing posterior and predictive distributions
+ex_bayes <- krige.bayes(ex_data, locations = ex_grid,
+                        model = model.control(cov.m="exponential"),
+                        prior = prior.control(beta.prior = 'flat',
+                                              sigmasq.prior = 'reciprocal',
+                                              phi.discrete=seq(0, 0.7, l=25),
+                                              phi.prior="uniform", 
+                                              tausq.rel.discrete = seq(0, 1, l=25),
+                                              tausq.rel.prior = 'uniform'))
+
+# Plot histograms with samples from the posterior
+hist(ex_bayes)
+
+# Plotting some prediction results
+image(ex_bayes, val = 'mean', main="predicted values")
+image(ex_bayes, val="variance", main="prediction variance")
+image(ex_bayes, val= "simulation", number.col=1,
+      main="a simulation from the \npredictive distribution")
+image(ex_bayes, val= "simulation", number.col=2,
+      main="another simulation from \nthe predictive distribution")
+```
+
+## `krige.conv()` demo
+- For this demonstration we will explore the `krige.bayes()` function in R using a modified script from the function description. With this exploration, answer the following questions.
+
+```{r}
+plot(variog(ex_data, max.dist=1))
+
+## fit covariance parameters from variogram
+variogram_params <- likfit(ex_data, ini = c(5, 0.3))
+summary(variogram_params)
+
+ex_conv <- krige.conv(ex_data, loc=ex_grid,
+                        krige = krige.control(obj.model = variogram_params))
+
+summary(ex_conv)
+
+# Plotting some prediction results
+image(ex_conv, main="mean predictions")
+
+```
+
+
+## `spLM()` demo
+- Another option for fitting Bayesian spatial models is the `spLM()` function in the `spBayes` package. Using the code on the next slide, answer the following questions.
+
+
+## Code
+
+```{r}
+rmvn <- function(n, mu=0, V = matrix(1)){
+  # function to generate spatial random effects
+  p <- length(mu)
+  if(any(is.na(match(dim(V),p))))
+    stop("Dimension problem!")
+  D <- chol(V)
+  t(matrix(rnorm(n*p), ncol=p)%*%D + rep(mu,rep(n,p)))
+}
+
+n <- 200
+coords <- cbind(runif(n,0,10), runif(n,0,10))
+X <- as.matrix(cbind(1, rnorm(n)))
+
+beta <- as.matrix(c(1,5))
+p <- length(beta)
+
+sigma.sq <- 2
+tau.sq <- 0.1
+phi <- 3
+
+D <- as.matrix(dist(coords))
+H <- exp(-D/ phi)
+w <- rmvn(1, rep(0,n), sigma.sq * H)
+y <- rnorm(n, X %*% beta + w, sqrt(tau.sq))
+
+tibble(x1 = coords[,1], x2 = coords[,2], y = y) %>% ggplot(aes(x = x1, y = x2)) + geom_point(aes(color = y)) + scale_color_gradient2() + theme_minimal() 
+
+n.samples <- 5000
+
+starting <- list("phi"=2, "sigma.sq"=50, "tau.sq"=1)
+
+tuning <- list("phi"=.1, "sigma.sq"=.1, "tau.sq"=.1)
+
+priors <- list("beta.Norm"=list(rep(0,p), diag(1000,p)),
+                 "phi.Unif"=c(.1, 9), "sigma.sq.IG"=c(2, 2),
+                 "tau.sq.IG"=c(2, 0.1))
+
+m.1 <- spLM(y~X-1, coords=coords, starting=starting,
+            tuning=tuning, priors=priors, cov.model="exponential",
+            n.samples=n.samples, verbose=TRUE, n.report=500)
+
+burn.in <- 0.5*n.samples
+
+##recover beta and spatial random effects
+m.1 <- spRecover(m.1, start=burn.in, verbose=FALSE)
+
+
+# note this is 1/phi in how we have parameterized the model
+summary(m.1$p.theta.recover.samples)$quantiles
+
+summary(m.1$p.beta.recover.samples)$quantiles
+
+m.1.w.summary <- summary(mcmc(t(m.1$p.w.recover.samples)))$quantiles[,c(3,1,5)]
+
+plot(w, m.1.w.summary[,1], xlab="Observed w", ylab="Fitted w",
+     xlim=range(w), ylim=range(m.1.w.summary), main="Spatial random effects")
+arrows(w, m.1.w.summary[,1], w, m.1.w.summary[,2], length=0.02, angle=90)
+arrows(w, m.1.w.summary[,1], w, m.1.w.summary[,3], length=0.02, angle=90)
+lines(range(w), range(w), col = 'red')
+```
